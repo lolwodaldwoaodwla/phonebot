@@ -1,6 +1,2 @@
 __pycache__/
 *.pyc
-bot_data.json
-bot_data.db
-bot_data.db-wal
-bot_data.db-shm
