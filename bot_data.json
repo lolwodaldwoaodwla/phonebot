@@ -1,0 +1,404 @@
+{
+  "6068835569": {
+    "points": 100238649,
+    "tcoins": 1488,
+    "cards": 24,
+    "phones_value": 329350,
+    "achievements": 0,
+    "profile_views": 1,
+    "viewed_by": [
+      "6529074905"
+    ],
+    "status": "Тестер, Ultra",
+    "username": "",
+    "collection": {
+      "Apple iPhone X": {
+        "rarity": "Редкий",
+        "price": 7500,
+        "count": 3
+      },
+      "Google Nexus One": {
+        "rarity": "Ширпотреб",
+        "price": 600,
+        "count": 1
+      },
+      "Apple iPhone Xs": {
+        "rarity": "Редкий",
+        "price": 7500,
+        "count": 1
+      },
+      "Sony Xperia Z5": {
+        "rarity": "Необычный",
+        "price": 2250,
+        "count": 1
+      },
+      "Essential Phone": {
+        "rarity": "Необычный",
+        "price": 3000,
+        "count": 1
+      },
+      "HTC Sensation": {
+        "rarity": "Ширпотреб",
+        "price": 600,
+        "count": 2
+      },
+      "Apple iPhone 5c": {
+        "rarity": "Ширпотреб",
+        "price": 900,
+        "count": 1
+      },
+      "Apple iPhone Xs Max": {
+        "rarity": "Редкий",
+        "price": 8250,
+        "count": 1
+      },
+      "Huawei Mate X": {
+        "rarity": "Мистический",
+        "price": 38200,
+        "count": 1
+      },
+      "Samsung N7000 Galaxy Note (Белый)": {
+        "rarity": "Ширпотреб",
+        "price": 600,
+        "count": 1
+      },
+      "Samsung N7000 Galaxy Note": {
+        "rarity": "Ширпотреб",
+        "price": 600,
+        "count": 1
+      },
+      "Samsung Galaxy S22 Ultra": {
+        "rarity": "Мистический",
+        "price": 41200,
+        "count": 1
+      },
+      "Huawei Mate 40 Pro": {
+        "rarity": "Мистический",
+        "price": 35200,
+        "count": 1
+      },
+      "Vivo X200 Pro Mini": {
+        "rarity": "Аркана",
+        "price": 138800,
+        "count": 1
+      },
+      "Google Pixel XL": {
+        "rarity": "Необычный",
+        "price": 2250,
+        "count": 1
+      },
+      "Apple iPhone 7": {
+        "rarity": "Ширпотреб",
+        "price": 1500,
+        "count": 1
+      },
+      "Samsung Galaxy S20 Ultra": {
+        "rarity": "Мистический",
+        "price": 24800,
+        "count": 1
+      }
+    },
+    "last_card_time": 1783255486,
+    "card_cooldown": 60,
+    "rarity_chances": {},
+    "last_dropped": [
+      "Google Pixel XL",
+      "Apple iPhone 7",
+      "Samsung Galaxy S20 Ultra"
+    ],
+    "broken_collection": {
+      "Samsung Galaxy S20 Ultra": {
+        "rarity": "Мистический",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "отвал памяти",
+          "сгоревший чип"
+        ]
+      },
+      "Apple iPhone 7": {
+        "rarity": "Ширпотреб",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "разбитый экран",
+          "сломанная материнская плата"
+        ]
+      },
+      "Sony Xperia Z5": {
+        "rarity": "Необычный",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "разбитый экран",
+          "сломанная материнская плата"
+        ]
+      },
+      "Huawei Mate X": {
+        "rarity": "Мистический",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "сгоревший чип",
+          "отвал памяти"
+        ]
+      }
+    },
+    "drop_chance_level": 6
+  },
+  "6529074905": {
+    "points": 99999898118962,
+    "tcoins": 99999999998511,
+    "cards": 62,
+    "phones_value": 1807160,
+    "achievements": 42,
+    "profile_views": 1488,
+    "viewed_by": [],
+    "status": "Создатель",
+    "username": "",
+    "collection": {
+      "Google Pixel XL": {
+        "rarity": "Необычный",
+        "price": 2250,
+        "count": 3
+      },
+      "Essential Phone": {
+        "rarity": "Необычный",
+        "price": 3000,
+        "count": 2
+      },
+      "Nokia 8": {
+        "rarity": "Необычный",
+        "price": 3000,
+        "count": 1
+      },
+      "Motorola Defy Plus": {
+        "rarity": "Ширпотреб",
+        "price": 1050,
+        "count": 3
+      },
+      "Google Nexus One": {
+        "rarity": "Ширпотреб",
+        "price": 600,
+        "count": 3
+      },
+      "Apple iPhone Xs Max": {
+        "rarity": "Редкий",
+        "price": 8250,
+        "count": 3
+      },
+      "Xiaomi 13 Ultra": {
+        "rarity": "Хроматический",
+        "price": 82500,
+        "count": 4
+      },
+      "Huawei Mate 10 Pro": {
+        "rarity": "Необычный",
+        "price": 3000,
+        "count": 2
+      },
+      "Vivo X Fold": {
+        "rarity": "Мистический",
+        "price": 28500,
+        "count": 2
+      },
+      "Apple iPhone XR": {
+        "rarity": "Редкий",
+        "price": 7500,
+        "count": 3
+      },
+      "Samsung i9300 Galaxy S III": {
+        "rarity": "Ширпотреб",
+        "price": 1050,
+        "count": 2
+      },
+      "HTC One M7": {
+        "rarity": "Ширпотреб",
+        "price": 750,
+        "count": 2
+      },
+      "Samsung N7000 Galaxy Note (Белый)": {
+        "rarity": "Ширпотреб",
+        "price": 600,
+        "count": 2
+      },
+      "LG Optimus 3D P920": {
+        "rarity": "Ширпотреб",
+        "price": 980,
+        "count": 2
+      },
+      "Apple iPhone Xs": {
+        "rarity": "Редкий",
+        "price": 7500,
+        "count": 1
+      },
+      "Sony Xperia Z5": {
+        "rarity": "Необычный",
+        "price": 2250,
+        "count": 3
+      },
+      "Apple iPhone X": {
+        "rarity": "Редкий",
+        "price": 7500,
+        "count": 2
+      },
+      "Apple iPhone 11": {
+        "rarity": "Редкий",
+        "price": 8600,
+        "count": 1
+      },
+      "Apple iPhone 3G": {
+        "rarity": "Ширпотреб",
+        "price": 600,
+        "count": 2
+      },
+      "Apple iPhone 11 Pro": {
+        "rarity": "Редкий",
+        "price": 12400,
+        "count": 1
+      },
+      "Vivo X200 FE": {
+        "rarity": "Аркана",
+        "price": 135000,
+        "count": 1
+      },
+      "Samsung Galaxy S20 Ultra": {
+        "rarity": "Мистический",
+        "price": 24800,
+        "count": 1
+      },
+      "Meizu 16th": {
+        "rarity": "Необычный",
+        "price": 3000,
+        "count": 1
+      },
+      "Nothing Phone 2a": {
+        "rarity": "Хроматический",
+        "price": 46500,
+        "count": 1
+      },
+      "Apple iPhone 17 Pro": {
+        "rarity": "Платиновый",
+        "price": 315000,
+        "count": 1
+      },
+      "HTC Sensation": {
+        "rarity": "Ширпотреб",
+        "price": 600,
+        "count": 2
+      },
+      "Xiaomi 13 Pro": {
+        "rarity": "Артефакт",
+        "price": 500000,
+        "count": 1
+      },
+      "Honor 200 Pro": {
+        "rarity": "Хроматический",
+        "price": 52500,
+        "count": 1
+      },
+      "Vivo X200": {
+        "rarity": "Аркана",
+        "price": 131200,
+        "count": 1
+      },
+      "Honor Magic V2": {
+        "rarity": "Хроматический",
+        "price": 78800,
+        "count": 1
+      }
+    },
+    "last_card_time": 1783255272,
+    "card_cooldown": 1,
+    "rarity_chances": {},
+    "last_dropped": [
+      "Samsung i9300 Galaxy S III",
+      "Samsung N7000 Galaxy Note (Белый)",
+      "Google Nexus One"
+    ],
+    "broken_collection": {
+      "Apple iPhone 3G": {
+        "rarity": "Ширпотреб",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "вздутый аккумулятор"
+        ]
+      },
+      "Google Pixel XL": {
+        "rarity": "Необычный",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "сломанная материнская плата",
+          "разбитый экран"
+        ]
+      },
+      "Apple iPhone Xs": {
+        "rarity": "Редкий",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "разбитый экран"
+        ]
+      },
+      "Samsung Galaxy Note 4": {
+        "rarity": "Ширпотреб",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "вздутый аккумулятор"
+        ]
+      },
+      "Nokia 8": {
+        "rarity": "Необычный",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "отвал памяти",
+          "сгоревший чип"
+        ]
+      },
+      "Nothing Phone 2a": {
+        "rarity": "Хроматический",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "сломанная материнская плата",
+          "разбитый экран"
+        ]
+      },
+      "Apple iPhone 5c": {
+        "rarity": "Ширпотреб",
+        "price": 0,
+        "count": 1,
+        "damages": [
+          "разбитый экран",
+          "сломанная материнская плата"
+        ]
+      }
+    },
+    "drop_chance_level": 6
+  },
+  "8836951921": {
+    "points": 0,
+    "tcoins": 0,
+    "cards": 0,
+    "phones_value": 0,
+    "achievements": 0,
+    "profile_views": 0,
+    "viewed_by": [],
+    "status": "Обычный",
+    "username": "",
+    "collection": {},
+    "last_card_time": 0,
+    "card_cooldown": 10800,
+    "rarity_chances": {},
+    "last_dropped": []
+  },
+  "_settings": {
+    "broken_chance_default": 20,
+    "broken_chance_ultra": 5,
+    "broken_chance_creator": 0
+  }
+}
