@@ -50,9 +50,9 @@ class _TursoDB:
             if p is None:
                 args.append({"type": "null"})
             elif isinstance(p, int):
-                args.append({"type": "integer", "value": p})
+                args.append({"type": "integer", "value": str(p)})
             elif isinstance(p, float):
-                args.append({"type": "float", "value": p})
+                args.append({"type": "float", "value": str(p)})
             else:
                 args.append({"type": "text", "value": str(p)})
         return args
