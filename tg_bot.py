@@ -10,12 +10,6 @@ import requests
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 try:
-    from libsql import connect as _libsql_connect
-    _HAS_TURSO = True
-except ImportError:
-    _HAS_TURSO = False
-
-try:
     import psutil
     HAS_PSUTIL = True
 except ImportError:
@@ -32,14 +26,108 @@ DATA_FILE = "bot_data.json"
 
 TURSO_URL = os.environ.get("TURSO_DB_URL", "")
 TURSO_TOKEN = os.environ.get("TURSO_DB_TOKEN", "")
+_USE_TURSO = bool(TURSO_URL and TURSO_TOKEN)
 
 _conn = None
+
+
+class _TursoDB:
+    """Обёртка над Turso HTTP API — совместима с sqlite3 интерфейсом."""
+    def __init__(self, url, token):
+        self._url = url.rstrip("/")
+        self._token = token
+        self._headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+    def _convert_args(self, params):
+        """Конвертирует параметры sqlite3 ? в формат Turso args."""
+        if not params:
+            return []
+        args = []
+        for p in params:
+            if p is None:
+                args.append({"type": "null"})
+            elif isinstance(p, int):
+                args.append({"type": "integer", "value": p})
+            elif isinstance(p, float):
+                args.append({"type": "float", "value": p})
+            else:
+                args.append({"type": "text", "value": str(p)})
+        return args
+
+    def _request(self, sql, params=()):
+        """Отправляет запрос к Turso HTTP API."""
+        payload = {
+            "requests": [
+                {
+                    "type": "execute",
+                    "stmt": {
+                        "sql": sql,
+                        "args": self._convert_args(params)
+                    }
+                }
+            ]
+        }
+        resp = requests.post(
+            f"{self._url}/v2/pipeline",
+            headers=self._headers,
+            json=payload,
+            timeout=10
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        result = data["results"][0].get("response", {}).get("result", {})
+        return result
+
+    def execute(self, sql, params=()):
+        """Выполняет SQL и возвращает объект-курсор."""
+        result = self._request(sql, params)
+        cols = [c["name"] for c in result.get("cols", [])]
+        rows = []
+        for r in result.get("rows", []):
+            row = {}
+            for i, col in enumerate(cols):
+                val = r[col] if col in r else None
+                if isinstance(val, str):
+                    try:
+                        val = json.loads(val)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                row[col] = val
+            rows.append(row)
+        return _FakeCursor(cols, rows)
+
+    def executescript(self, sql):
+        """Выполняет несколько SQL statements (для локальной совместимости)."""
+        for statement in sql.split(";"):
+            statement = statement.strip()
+            if statement:
+                self._request(statement)
+
+    def commit(self):
+        pass
+
+
+class _FakeCursor:
+    """Фейковый курсор для совместимости с sqlite3."""
+    def __init__(self, columns, rows):
+        self._columns = columns
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
 
 def _get_db():
     global _conn
     if _conn is None:
-        if _HAS_TURSO and TURSO_URL:
-            _conn = _libsql_connect(TURSO_URL, auth_token=TURSO_TOKEN)
+        if _USE_TURSO:
+            _conn = _TursoDB(TURSO_URL, TURSO_TOKEN)
         else:
             import sqlite3
             db_path = os.environ.get("BOT_DB_PATH", "bot_data.db")
@@ -49,31 +137,28 @@ def _get_db():
             _conn.execute("PRAGMA synchronous=NORMAL")
     return _conn
 
+
 def _db_execute(db, sql, params=()):
     """Выполняет SQL запрос и возвращает список dict-строк."""
     cursor = db.execute(sql, params)
-    if _HAS_TURSO and TURSO_URL:
-        columns = [d[0] for d in cursor.description] if cursor.description else []
-        rows = cursor.fetchall()
-        return [dict(zip(columns, r)) for r in rows]
+    if _USE_TURSO:
+        return cursor.fetchall()
     else:
         return [dict(r) for r in cursor.fetchall()]
+
 
 def _db_execute_one(db, sql, params=()):
     """Выполняет SQL запрос и возвращает одну dict-строку или None."""
     cursor = db.execute(sql, params)
-    row = cursor.fetchone()
-    if row is None:
-        return None
-    if _HAS_TURSO and TURSO_URL:
-        columns = [d[0] for d in cursor.description] if cursor.description else []
-        return dict(zip(columns, row))
+    if _USE_TURSO:
+        return cursor.fetchone()
     else:
-        return dict(row)
+        row = cursor.fetchone()
+        return dict(row) if row else None
 
 def _init_db():
     db = _get_db()
-    if _HAS_TURSO and TURSO_URL:
+    if _USE_TURSO:
         db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0, tcoins INTEGER DEFAULT 0, cards INTEGER DEFAULT 0, phones_value INTEGER DEFAULT 0, achievements INTEGER DEFAULT 0, profile_views INTEGER DEFAULT 0, status TEXT DEFAULT 'Обычный', username TEXT DEFAULT '', last_card_time INTEGER DEFAULT 0, card_cooldown INTEGER DEFAULT 10800, rarity_chances TEXT DEFAULT '{}', last_dropped TEXT DEFAULT '[]')")
         db.execute("CREATE TABLE IF NOT EXISTS collection (user_id INTEGER, phone_name TEXT, rarity TEXT, price INTEGER, count INTEGER DEFAULT 1, PRIMARY KEY (user_id, phone_name))")
         db.execute("CREATE TABLE IF NOT EXISTS viewed_by (target_id INTEGER, viewer_id INTEGER, PRIMARY KEY (target_id, viewer_id))")
