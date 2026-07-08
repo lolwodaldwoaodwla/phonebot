@@ -1,4 +1,4 @@
 pyTelegramBotAPI
 Pillow
 requests
-pip install psutil
+psutil
