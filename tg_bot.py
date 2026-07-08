@@ -10,18 +10,158 @@ import requests
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 try:
+    from libsql import connect as _libsql_connect
+    _HAS_TURSO = True
+except ImportError:
+    _HAS_TURSO = False
+
+try:
     import psutil
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
 
-bot = telebot.TeleBot("8809903771:AAHqCrXvOwdIN9BElGPOfRycQaOG7S7vkVA")
+_db_lock = threading.Lock()
+
+bot = telebot.TeleBot(os.environ.get("BOT_TOKEN", "8809903771:AAHqCrXvOwdIN9BElGPOfRycQaOG7S7vkVA"))
 
 BOT_START_TIME = time.time()
 
 IMAGE_FOLDER = "images"
 DATA_FILE = "bot_data.json"
-_data_lock = threading.Lock()  # защита от race condition с weekly_tester_pay
+
+TURSO_URL = os.environ.get("TURSO_DB_URL", "")
+TURSO_TOKEN = os.environ.get("TURSO_DB_TOKEN", "")
+
+_conn = None
+
+def _get_db():
+    global _conn
+    if _conn is None:
+        if _HAS_TURSO and TURSO_URL:
+            _conn = _libsql_connect(TURSO_URL, auth_token=TURSO_TOKEN)
+        else:
+            import sqlite3
+            db_path = os.environ.get("BOT_DB_PATH", "bot_data.db")
+            _conn = sqlite3.connect(db_path, check_same_thread=False)
+            _conn.row_factory = sqlite3.Row
+            _conn.execute("PRAGMA journal_mode=WAL")
+            _conn.execute("PRAGMA synchronous=NORMAL")
+    return _conn
+
+def _db_execute(db, sql, params=()):
+    """Выполняет SQL запрос и возвращает список dict-строк."""
+    cursor = db.execute(sql, params)
+    if _HAS_TURSO and TURSO_URL:
+        columns = [d[0] for d in cursor.description] if cursor.description else []
+        rows = cursor.fetchall()
+        return [dict(zip(columns, r)) for r in rows]
+    else:
+        return [dict(r) for r in cursor.fetchall()]
+
+def _db_execute_one(db, sql, params=()):
+    """Выполняет SQL запрос и возвращает одну dict-строку или None."""
+    cursor = db.execute(sql, params)
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    if _HAS_TURSO and TURSO_URL:
+        columns = [d[0] for d in cursor.description] if cursor.description else []
+        return dict(zip(columns, row))
+    else:
+        return dict(row)
+
+def _init_db():
+    db = _get_db()
+    if _HAS_TURSO and TURSO_URL:
+        db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0, tcoins INTEGER DEFAULT 0, cards INTEGER DEFAULT 0, phones_value INTEGER DEFAULT 0, achievements INTEGER DEFAULT 0, profile_views INTEGER DEFAULT 0, status TEXT DEFAULT 'Обычный', username TEXT DEFAULT '', last_card_time INTEGER DEFAULT 0, card_cooldown INTEGER DEFAULT 10800, rarity_chances TEXT DEFAULT '{}', last_dropped TEXT DEFAULT '[]')")
+        db.execute("CREATE TABLE IF NOT EXISTS collection (user_id INTEGER, phone_name TEXT, rarity TEXT, price INTEGER, count INTEGER DEFAULT 1, PRIMARY KEY (user_id, phone_name))")
+        db.execute("CREATE TABLE IF NOT EXISTS viewed_by (target_id INTEGER, viewer_id INTEGER, PRIMARY KEY (target_id, viewer_id))")
+    else:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            points INTEGER DEFAULT 0,
+            tcoins INTEGER DEFAULT 0,
+            cards INTEGER DEFAULT 0,
+            phones_value INTEGER DEFAULT 0,
+            achievements INTEGER DEFAULT 0,
+            profile_views INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'Обычный',
+            username TEXT DEFAULT '',
+            last_card_time INTEGER DEFAULT 0,
+            card_cooldown INTEGER DEFAULT 10800,
+            rarity_chances TEXT DEFAULT '{}',
+            last_dropped TEXT DEFAULT '[]'
+        );
+        CREATE TABLE IF NOT EXISTS collection (
+            user_id INTEGER,
+            phone_name TEXT,
+            rarity TEXT,
+            price INTEGER,
+            count INTEGER DEFAULT 1,
+            PRIMARY KEY (user_id, phone_name)
+        );
+        CREATE TABLE IF NOT EXISTS viewed_by (
+            target_id INTEGER,
+            viewer_id INTEGER,
+            PRIMARY KEY (target_id, viewer_id)
+        );
+    """)
+    db.commit()
+
+def _migrate_from_json():
+    """Если есть bot_data.json — переносим данные в SQLite."""
+    if not os.path.exists(DATA_FILE):
+        return
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not data:
+            return
+        db = _get_db()
+        for uid_str, udata in data.items():
+            uid = int(uid_str)
+            collection = udata.get("collection", {})
+            viewed_by = udata.get("viewed_by", [])
+            last_dropped = udata.get("last_dropped", [])
+            rarity_chances = udata.get("rarity_chances", {})
+            db.execute("""INSERT OR REPLACE INTO users
+                (user_id, points, tcoins, cards, phones_value, achievements,
+                 profile_views, status, username, last_card_time, card_cooldown,
+                 rarity_chances, last_dropped)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (uid,
+                 udata.get("points", 0),
+                 udata.get("tcoins", 0),
+                 udata.get("cards", 0),
+                 udata.get("phones_value", 0),
+                 udata.get("achievements", 0),
+                 udata.get("profile_views", 0),
+                 udata.get("status", "Обычный"),
+                 udata.get("username", ""),
+                 udata.get("last_card_time", 0),
+                 udata.get("card_cooldown", 10800),
+                 json.dumps(rarity_chances, ensure_ascii=False),
+                 json.dumps(last_dropped, ensure_ascii=False)))
+            for phone_name, info in collection.items():
+                db.execute("""INSERT OR REPLACE INTO collection
+                    (user_id, phone_name, rarity, price, count)
+                    VALUES (?,?,?,?,?)""",
+                    (uid, phone_name, info["rarity"], info["price"], info["count"]))
+            for viewer_id in viewed_by:
+                db.execute("INSERT OR IGNORE INTO viewed_by (target_id, viewer_id) VALUES (?,?)",
+                           (uid, int(viewer_id)))
+        db.commit()
+        # Переименовываем JSON файл чтобы не мигрировать снова
+        os.rename(DATA_FILE, DATA_FILE + ".migrated")
+        print(f"Миграция из JSON в SQLite завершена ({len(data)} пользователей)")
+    except Exception as e:
+        print(f"Ошибка миграции из JSON: {e}")
+
+# Инициализация при запуске
+_init_db()
+_migrate_from_json()
 
 rarity_chances = {
     "Ширпотреб": 34.59,
@@ -115,76 +255,164 @@ rarity_icons = {
 }
 
 def load_data():
-    with _data_lock:
-        if os.path.exists(DATA_FILE):
-            try:
-                with open(DATA_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except json.JSONDecodeError:
-                print("Ошибка: bot_data.json повреждён, создаём заново...")
-                data = {}
-        else:
-            data = {}
-        # Гарантируем наличие настроек бота
-        if "_settings" not in data:
-            data["_settings"] = {
-                "broken_chance_default": 20,  # %
-                "broken_chance_ultra": 5,     # %
-                "broken_chance_creator": 0    # %
+    """Совместимость: возвращает dict всех пользователей (для топов и поиска по юзернейму)."""
+    with _db_lock:
+        db = _get_db()
+        rows = _db_execute(db, "SELECT user_id, points, tcoins, cards, phones_value, achievements, profile_views, status, username, last_card_time, card_cooldown, rarity_chances, last_dropped FROM users")
+        col_rows = _db_execute(db, "SELECT user_id, phone_name, rarity, price, count FROM collection")
+        view_rows = _db_execute(db, "SELECT target_id, viewer_id FROM viewed_by")
+
+    data = {}
+    for r in rows:
+        uid = str(r["user_id"])
+        data[uid] = {
+            "points": r["points"],
+            "tcoins": r["tcoins"],
+            "cards": r["cards"],
+            "phones_value": r["phones_value"],
+            "achievements": r["achievements"],
+            "profile_views": r["profile_views"],
+            "status": r["status"],
+            "username": r["username"],
+            "last_card_time": r["last_card_time"],
+            "card_cooldown": r["card_cooldown"],
+            "rarity_chances": json.loads(r["rarity_chances"]) if r["rarity_chances"] else {},
+            "last_dropped": json.loads(r["last_dropped"]) if r["last_dropped"] else [],
+            "viewed_by": [],
+            "collection": {},
+        }
+    for r in col_rows:
+        uid = str(r["user_id"])
+        if uid in data:
+            data[uid]["collection"][r["phone_name"]] = {
+                "rarity": r["rarity"],
+                "price": r["price"],
+                "count": r["count"],
             }
-        return data
+    for r in view_rows:
+        uid = str(r["target_id"])
+        if uid in data:
+            data[uid]["viewed_by"].append(str(r["viewer_id"]))
+    return data
 
 def save_data(data):
-    with _data_lock:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    """Совместимость: сохраняет полный dict в SQLite."""
+    with _db_lock:
+        db = _get_db()
+        for uid_str, udata in data.items():
+            uid = int(uid_str)
+            db.execute("""INSERT OR REPLACE INTO users
+                (user_id, points, tcoins, cards, phones_value, achievements,
+                 profile_views, status, username, last_card_time, card_cooldown,
+                 rarity_chances, last_dropped)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (uid,
+                 udata.get("points", 0),
+                 udata.get("tcoins", 0),
+                 udata.get("cards", 0),
+                 udata.get("phones_value", 0),
+                 udata.get("achievements", 0),
+                 udata.get("profile_views", 0),
+                 udata.get("status", "Обычный"),
+                 udata.get("username", ""),
+                 udata.get("last_card_time", 0),
+                 udata.get("card_cooldown", 10800),
+                 json.dumps(udata.get("rarity_chances", {}), ensure_ascii=False),
+                 json.dumps(udata.get("last_dropped", []), ensure_ascii=False)))
+            # Сохраняем коллекцию
+            collection = udata.get("collection", {})
+            for phone_name, info in collection.items():
+                db.execute("""INSERT OR REPLACE INTO collection
+                    (user_id, phone_name, rarity, price, count)
+                    VALUES (?,?,?,?,?)""",
+                    (uid, phone_name, info["rarity"], info["price"], info["count"]))
+            # Сохраняем viewed_by
+            for viewer_id in udata.get("viewed_by", []):
+                db.execute("INSERT OR IGNORE INTO viewed_by (target_id, viewer_id) VALUES (?,?)",
+                           (uid, int(viewer_id)))
+        db.commit()
 
 def get_user_data(user_id, username):
-    data = load_data()
-    uid = str(user_id)
-    if uid not in data:
-        data[uid] = {
-            "points": 0,
-            "tcoins": 0,
-            "cards": 0,
-            "phones_value": 0,
-            "achievements": 0,
-            "profile_views": 0,
-            "viewed_by": [],
-            "status": "Обычный",
-            "username": username or "",
-            "collection": {},
-            "last_card_time": 0,
-            "card_cooldown": 10800,
-            "rarity_chances": {},
-            "last_dropped": []
+    with _db_lock:
+        db = _get_db()
+        row = _db_execute_one(db, "SELECT * FROM users WHERE user_id = ?", (user_id,))
+        col_rows = _db_execute(db, "SELECT phone_name, rarity, price, count FROM collection WHERE user_id = ?", (user_id,))
+        view_rows = _db_execute(db, "SELECT viewer_id FROM viewed_by WHERE target_id = ?", (user_id,))
+
+    collection = {}
+    for r in col_rows:
+        collection[r["phone_name"]] = {
+            "rarity": r["rarity"],
+            "price": r["price"],
+            "count": r["count"],
         }
-        save_data(data)
-    else:
-        changed = False
-        if "collection" not in data[uid]:
-            data[uid]["collection"] = {}
-            changed = True
-        if "last_card_time" not in data[uid]:
-            data[uid]["last_card_time"] = 0
-            changed = True
-        if "card_cooldown" not in data[uid]:
-            data[uid]["card_cooldown"] = 10800
-            changed = True
-        if "rarity_chances" not in data[uid]:
-            data[uid]["rarity_chances"] = {}
-            changed = True
-        if "last_dropped" not in data[uid]:
-            data[uid]["last_dropped"] = []
-            changed = True
-        if changed:
-            save_data(data)
-    return data[uid]
+    viewed_by = [str(r["viewer_id"]) for r in view_rows]
+
+    if row:
+        return {
+            "points": row["points"],
+            "tcoins": row["tcoins"],
+            "cards": row["cards"],
+            "phones_value": row["phones_value"],
+            "achievements": row["achievements"],
+            "profile_views": row["profile_views"],
+            "status": row["status"],
+            "username": row["username"],
+            "last_card_time": row["last_card_time"],
+            "card_cooldown": row["card_cooldown"],
+            "rarity_chances": json.loads(row["rarity_chances"]) if row["rarity_chances"] else {},
+            "last_dropped": json.loads(row["last_dropped"]) if row["last_dropped"] else [],
+            "viewed_by": viewed_by,
+            "collection": collection,
+        }
+
+    # Новый пользователь
+    with _db_lock:
+        db = _get_db()
+        db.execute("INSERT INTO users (user_id, username) VALUES (?, ?)", (user_id, username or ""))
+        db.commit()
+
+    return {
+        "points": 0, "tcoins": 0, "cards": 0, "phones_value": 0,
+        "achievements": 0, "profile_views": 0, "status": "Обычный",
+        "username": username or "", "collection": {},
+        "last_card_time": 0, "card_cooldown": 10800,
+        "rarity_chances": {}, "last_dropped": [], "viewed_by": [],
+    }
 
 def update_user(user_id, udata):
-    data = load_data()
-    data[str(user_id)] = udata
-    save_data(data)
+    with _db_lock:
+        db = _get_db()
+        db.execute("""INSERT OR REPLACE INTO users
+            (user_id, points, tcoins, cards, phones_value, achievements,
+             profile_views, status, username, last_card_time, card_cooldown,
+             rarity_chances, last_dropped)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (user_id,
+             udata.get("points", 0),
+             udata.get("tcoins", 0),
+             udata.get("cards", 0),
+             udata.get("phones_value", 0),
+             udata.get("achievements", 0),
+             udata.get("profile_views", 0),
+             udata.get("status", "Обычный"),
+             udata.get("username", ""),
+             udata.get("last_card_time", 0),
+             udata.get("card_cooldown", 10800),
+             json.dumps(udata.get("rarity_chances", {}), ensure_ascii=False),
+             json.dumps(udata.get("last_dropped", []), ensure_ascii=False)))
+        # Обновляем коллекцию
+        collection = udata.get("collection", {})
+        db.execute("DELETE FROM collection WHERE user_id = ?", (user_id,))
+        for phone_name, info in collection.items():
+            db.execute("INSERT INTO collection (user_id, phone_name, rarity, price, count) VALUES (?,?,?,?,?)",
+                       (user_id, phone_name, info["rarity"], info["price"], info["count"]))
+        # Обновляем viewed_by
+        db.execute("DELETE FROM viewed_by WHERE target_id = ?", (user_id,))
+        for viewer_id in udata.get("viewed_by", []):
+            db.execute("INSERT INTO viewed_by (target_id, viewer_id) VALUES (?,?)",
+                       (user_id, int(viewer_id)))
+        db.commit()
 
 def find_image(phone_name):
     if not os.path.exists(IMAGE_FOLDER):
@@ -197,10 +425,14 @@ def find_image(phone_name):
 
 def get_user_chances(user_id):
     udata = get_user_data(user_id, "")
-    drop_lvl = udata.get("drop_chance_level", 0)
-    if 0 < drop_lvl < len(UPG_DROP_LEVELS):
-        return dict(UPG_DROP_LEVELS[drop_lvl])
-    return dict(rarity_chances)
+    custom = udata.get("rarity_chances", {})
+    chances = {}
+    if custom:
+        for rarity, default_chance in rarity_chances.items():
+            chances[rarity] = custom.get(rarity, 0)
+    else:
+        chances = dict(rarity_chances)
+    return chances
 
 def get_random_phone(user_id=None):
     if user_id:
@@ -244,122 +476,47 @@ def get_random_phone(user_id=None):
         fallback = [p for p in phones if p["rarity"] == "Ширпотреб"]
     return random.choice(fallback)
 
-BROKEN_REASONS = [
-    "Ваш телефон был забракован на заводе, из-за чего приехал нерабочим.",
-    "Служба доставки не уследила за качеством транспортировки, из-за чего ваш телефон был сломан.",
-    "По дороге курьер уронил коробку, и телефон повредился.",
-]
-
-ALL_DAMAGES = [
-    "разбитый экран", "сгоревший чип", "вздутый аккумулятор",
-    "отвал памяти", "сломанная материнская плата"
-]
-
-# Причины → возможные поломки (логика: от чего повредился — те и поломки)
-REASON_DAMAGES = {
-    0: [0, 2],         # завод: разбитый экран + вздутый аккумулятор
-    1: [0, 1, 3],      # доставка: разбитый экран + сгоревший чип + отвал памяти
-    2: [0, 4],         # курьер: разбитый экран + сломанная материнская плата
-}
-
-
-def generate_broken_info():
-    """Генерирует причину поломки и список поломок."""
-    reason_idx = random.randint(0, len(BROKEN_REASONS) - 1)
-    reason = BROKEN_REASONS[reason_idx]
-    # Берём 1-2 поломки из подходящих для этой причины
-    possible = REASON_DAMAGES.get(reason_idx, [0, 1])
-    count = random.randint(1, 2)
-    chosen = random.sample(possible, min(count, len(possible)))
-    damages = [ALL_DAMAGES[i] for i in chosen]
-    return reason, damages
-
-
-def get_card_text(user_name, phone, broken=False, reason="", damages=None):
+def get_card_text(user_name, phone):
     icon = rarity_icons.get(phone['rarity'], "📱")
-    price_display = 0 if broken else phone['price']
-    text = (
-        f"{user_name}, вам выпал телефон!\n\n"
-        f"{icon} {phone['name']}\n"
-        f"Редкость: {phone['rarity']} | Цена: {price_display} ПОчек"
+    return (
+        f"**{user_name}** вам выпал телефон!\n"
+        f"{icon} **{phone['name']}**\n"
+        f"Редкость: {phone['rarity']} | 💰 Цена: {phone['price']} ПОчек"
     )
-    if broken:
-        text += f"\n\n{reason}\n\nПоломки: {', '.join(damages)}"
-    return text
 
-def add_phone_to_collection(user_id, phone, broken=False, damages=None):
+def add_phone_to_collection(user_id, phone):
     udata = get_user_data(user_id, "")
-    # Сломанные — в broken_collection, рабочие — в collection
-    if broken:
-        bc = udata.get("broken_collection", {})
-        key = phone["name"]
-        if key in bc:
-            bc[key]["count"] += 1
-        else:
-            bc[key] = {
-                "rarity": phone["rarity"],
-                "price": 0,
-                "count": 1,
-                "damages": damages or [],
-            }
-        udata["broken_collection"] = bc
+    collection = udata.get("collection", {})
+    if phone["name"] in collection:
+        collection[phone["name"]]["count"] += 1
     else:
-        collection = udata.get("collection", {})
-        if phone["name"] in collection:
-            collection[phone["name"]]["count"] += 1
-        else:
-            collection[phone["name"]] = {
-                "rarity": phone["rarity"],
-                "price": phone["price"],
-                "count": 1
-            }
-        udata["collection"] = collection
-        udata["phones_value"] = udata.get("phones_value", 0) + phone["price"]
+        collection[phone["name"]] = {
+            "rarity": phone["rarity"],
+            "price": phone["price"],
+            "count": 1
+        }
+    udata["collection"] = collection
+    udata["phones_value"] = udata.get("phones_value", 0) + phone["price"]
     udata["cards"] = udata.get("cards", 0) + 1
     update_user(user_id, udata)
 
 _card_actions = {}  # user_id -> {name, price, rarity, sell_price, message_id, chat_id, has_photo, original_text}
-_card_lock = {}    # user_id -> True  защита от двойного срабатывания пкарточки
 _inv_action = {}    # user_id -> {phone_name, rarity, price, sell_price, msg_id, has_photo}
 _inv_main_msg = {}  # user_id -> {msg_id, has_photo}
-_upg_shop_msg = {}  # user_id -> {msg_id, has_photo}
 _pay_pending = {}   # user_id -> {target_id, amount, target_display, msg_id, chat_id, comment}
 _paycoin_pending = {}  # user_id -> {target_id, amount, target_display, sender_name, msg_id, chat_id}
 
 def send_card(message, phone):
-    # Шанс сломанного телефона из настроек
-    data = load_data()
-    settings = data.get("_settings", {})
-    status = get_user_data(message.from_user.id, "").get("status", "Обычный")
-
-    if "Создатель" in status:
-        chance = settings.get("broken_chance_creator", 0) / 100
-    elif "Ultra" in status:
-        chance = settings.get("broken_chance_ultra", 5) / 100
-    else:
-        chance = settings.get("broken_chance_default", 20) / 100
-
-    broken = random.random() < chance
-    reason = ""
-    damages = []
-    if broken:
-        reason, damages = generate_broken_info()
-
-    add_phone_to_collection(message.from_user.id, phone, broken=broken, damages=damages)
-    text = get_card_text(message.from_user.first_name, phone, broken=broken, reason=reason, damages=damages)
-
-    if not broken:
-        sell_price = int(phone["price"] * 0.75)
-    else:
-        sell_price = 0
+    add_phone_to_collection(message.from_user.id, phone)
+    text = get_card_text(message.from_user.first_name, phone)
+    sell_price = int(phone["price"] * 0.75)
 
     uid = message.from_user.id
     _card_actions[uid] = {
         "name": phone["name"],
-        "price": 0 if broken else phone["price"],
+        "price": phone["price"],
         "rarity": phone["rarity"],
         "sell_price": sell_price,
-        "broken": broken,
     }
 
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
@@ -368,10 +525,10 @@ def send_card(message, phone):
     img = find_image(phone["name"])
     if img:
         with open(img, "rb") as photo:
-            msg = bot.send_photo(message.chat.id, photo, caption=text, reply_markup=markup)
+            msg = bot.send_photo(message.chat.id, photo, caption=text, parse_mode="Markdown", reply_markup=markup)
         _card_actions[uid]["has_photo"] = True
     else:
-        msg = bot.send_message(message.chat.id, text, reply_markup=markup)
+        msg = bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
         _card_actions[uid]["has_photo"] = False
 
     _card_actions[uid]["message_id"] = msg.message_id
@@ -394,50 +551,31 @@ def format_cooldown(seconds):
     s = seconds % 60
     return f"{h} ч {m} мин {s} сек"
 
-def _try_lock_card(uid):
-    if _card_lock.get(uid):
-        return False
-    _card_lock[uid] = True
-    return True
-
-
-def _unlock_card(uid):
-    _card_lock.pop(uid, None)
-
-
-def _do_pcard(message):
-    uid = message.from_user.id
-    remaining = check_cooldown(uid)
-    if remaining > 0:
-        name = message.from_user.first_name or "игрок"
-        bot.send_message(message.chat.id, f"{name}, вы сможете выбить карту еще раз через {format_cooldown(remaining)}.")
-        return
-    phone = get_random_phone(uid)
-    send_card(message, phone)
-    udata = get_user_data(uid, "")
-    udata["last_card_time"] = int(time.time())
-    update_user(uid, udata)
-
-
 @bot.message_handler(commands=["pcard"])
 def cmd_pcard(message):
-    uid = message.from_user.id
-    if not _try_lock_card(uid):
+    remaining = check_cooldown(message.from_user.id)
+    if remaining > 0:
+        name = message.from_user.first_name or "игрок"
+        bot.send_message(message.chat.id, f"**{name}**, вы сможете выбить карту еще раз через {format_cooldown(remaining)}.", parse_mode="Markdown")
         return
-    try:
-        _do_pcard(message)
-    finally:
-        _unlock_card(uid)
+    phone = get_random_phone(message.from_user.id)
+    send_card(message, phone)
+    udata = get_user_data(message.from_user.id, "")
+    udata["last_card_time"] = int(time.time())
+    update_user(message.from_user.id, udata)
 
 @bot.message_handler(func=lambda m: m.text and m.text.lower() == "пкарточка")
 def text_pcard(message):
-    uid = message.from_user.id
-    if not _try_lock_card(uid):
+    remaining = check_cooldown(message.from_user.id)
+    if remaining > 0:
+        name = message.from_user.first_name or "игрок"
+        bot.send_message(message.chat.id, f"**{name}**, вы сможете выбить карту еще раз через {format_cooldown(remaining)}.", parse_mode="Markdown")
         return
-    try:
-        _do_pcard(message)
-    finally:
-        _unlock_card(uid)
+    phone = get_random_phone(message.from_user.id)
+    send_card(message, phone)
+    udata = get_user_data(message.from_user.id, "")
+    udata["last_card_time"] = int(time.time())
+    update_user(message.from_user.id, udata)
 
 def parse_pay_amount(text):
     """Парсит сумму с поддержкой 'к' (тысяча) и 'кк' (миллион)."""
@@ -544,7 +682,7 @@ def cmd_pay(message):
     sender_points = sender_data.get("points", 0)
     if sender_points < amount:
         name = message.from_user.first_name or "Игрок"
-        bot.reply_to(message, f"❌ {name}, у вас недостаточно ПОчек. Ваш баланс: {sender_points} ПОчек.", parse_mode="Markdown")
+        bot.reply_to(message, f"❌ **{name}**, у вас недостаточно ПОчек. Ваш баланс: {sender_points} ПОчек.", parse_mode="Markdown")
         return
 
     # Показываем подтверждение
@@ -1061,64 +1199,6 @@ def get_phones_by_rarity(user_id, rarity):
             result.append({"name": phone_name, "count": info["count"], "rarity": info["rarity"], "price": info["price"]})
     return result
 
-
-def get_broken_phones(user_id):
-    udata = get_user_data(user_id, "")
-    bc = udata.get("broken_collection", {})
-    result = []
-    for phone_name, info in bc.items():
-        result.append({
-            "name": phone_name,
-            "count": info["count"],
-            "rarity": info["rarity"],
-            "damages": info.get("damages", [])
-        })
-    return result
-
-
-def get_broken_rarities(user_id):
-    udata = get_user_data(user_id, "")
-    bc = udata.get("broken_collection", {})
-    rarities = {}
-    for phone_name, info in bc.items():
-        rarity = info["rarity"]
-        if rarity not in rarities:
-            rarities[rarity] = 0
-        rarities[rarity] += info["count"]
-    return rarities
-
-
-def get_broken_phones_by_rarity(user_id, rarity):
-    udata = get_user_data(user_id, "")
-    bc = udata.get("broken_collection", {})
-    result = []
-    for phone_name, info in bc.items():
-        if info["rarity"] == rarity:
-            result.append({"name": phone_name, "count": info["count"], "rarity": info["rarity"], "damages": info.get("damages", [])})
-    return result
-
-
-def inv_broken_rarities_markup(user_id):
-    rarities = get_broken_rarities(user_id)
-    markup = telebot.types.InlineKeyboardMarkup()
-    for rarity, count in rarities.items():
-        icon = rarity_icons.get(rarity, "📱")
-        markup.add(telebot.types.InlineKeyboardButton(text=f"{icon} {rarity} ({count})", callback_data=f"inv_bcat_{rarity}"))
-    markup.add(telebot.types.InlineKeyboardButton(text="📁 Назад", callback_data="inv_back_main"))
-    return markup
-
-
-def inv_broken_phones_markup(user_id, rarity):
-    phones_list = get_broken_phones_by_rarity(user_id, rarity)
-    markup = telebot.types.InlineKeyboardMarkup()
-    for p in phones_list:
-        markup.add(telebot.types.InlineKeyboardButton(
-            text=f"{p['name']} (x{p['count']})",
-            callback_data=f"inv_bphone_{p['name']}"
-        ))
-    markup.add(telebot.types.InlineKeyboardButton(text="📁 К категориям", callback_data="inv_broken"))
-    return markup
-
 def inv_main_markup():
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(telebot.types.InlineKeyboardButton(text="✅ Рабочие телефоны", callback_data="inv_working"))
@@ -1156,10 +1236,10 @@ def _inv_send_photo_msg(chat_id, caption, markup):
     inv_header = find_inv_header()
     if inv_header:
         with open(inv_header, "rb") as photo:
-            bot.send_photo(chat_id, photo, caption=caption, reply_markup=markup)
+            bot.send_photo(chat_id, photo, caption=caption, parse_mode="Markdown", reply_markup=markup)
         return True
     else:
-        bot.send_message(chat_id=chat_id, text=caption, reply_markup=markup)
+        bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown", reply_markup=markup)
         return False
 
 def _inv_edit_or_resend(call, text, markup):
@@ -1167,28 +1247,18 @@ def _inv_edit_or_resend(call, text, markup):
     uid = call.from_user.id
     info = _inv_main_msg.get(uid, {})
     has_photo = info.get("has_photo", False)
-    try:
-        if has_photo:
-            bot.edit_message_caption(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                caption=text, reply_markup=markup
-            )
-        else:
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=text, reply_markup=markup
-            )
-    except Exception as e:
-        # Если редактирование не удалось — удаляем старое и отправляем новое
-        print(f"inv_edit_or_resend ошибка: {e}")
-        try:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except:
-            pass
-        has_photo = _inv_send_photo_msg(call.message.chat.id, text, markup)
-        _inv_main_msg[uid] = {"has_photo": has_photo}
+    if has_photo:
+        bot.edit_message_caption(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            caption=text, parse_mode="Markdown", reply_markup=markup
+        )
+    else:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=text, parse_mode="Markdown", reply_markup=markup
+        )
 
 @bot.message_handler(commands=["myphones"])
 def cmd_myphones(message):
@@ -1198,11 +1268,11 @@ def cmd_myphones(message):
     inv_header = find_inv_header()
     if inv_header:
         with open(inv_header, "rb") as photo:
-            msg = bot.send_photo(message.chat.id, photo, caption=caption, reply_markup=inv_main_markup())
+            msg = bot.send_photo(message.chat.id, photo, caption=caption, parse_mode="Markdown", reply_markup=inv_main_markup())
         _inv_main_msg[uid] = {"has_photo": True}
     else:
         text = f"{caption}"
-        bot.send_message(message.chat.id, text, reply_markup=inv_main_markup())
+        bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=inv_main_markup())
         _inv_main_msg[uid] = {"has_photo": False}
 
 @bot.message_handler(func=lambda m: m.text and m.text.lower() == "пмои телефоны")
@@ -1217,90 +1287,7 @@ def inv_working(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "inv_broken")
 def inv_broken(call):
-    uid = call.from_user.id
-    rarities = get_broken_rarities(uid)
-    name = call.from_user.first_name or "игрок"
-    if not rarities:
-        _inv_edit_or_resend(call, f"{name}, у вас нет нерабочих телефонов.", inv_main_markup())
-        return
-    text = f"{name}, выберите категорию ваших нерабочих телефонов:"
-    _inv_edit_or_resend(call, text, inv_broken_rarities_markup(uid))
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("inv_bcat_"))
-def inv_broken_category(call):
-    rarity = call.data[9:]
-    phones_list = get_broken_phones_by_rarity(call.from_user.id, rarity)
-    total = sum(p["count"] for p in phones_list)
-    name = call.from_user.first_name or "игрок"
-    text = f"{name}, ваши нерабочие {rarity.lower()} телефоны ({total} шт.):"
-    _inv_edit_or_resend(call, text, inv_broken_phones_markup(call.from_user.id, rarity))
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("inv_bphone_"))
-def inv_bphone(call):
-    phone_name = call.data[11:]
-    uid = call.from_user.id
-    udata = get_user_data(uid, "")
-    bc = udata.get("broken_collection", {})
-    info = bc.get(phone_name, {})
-    count = info.get("count", 0)
-    rarity = info.get("rarity", "Ширпотреб")
-    damages = info.get("damages", [])
-    icon = rarity_icons.get(rarity, "📱")
-
-    text = (
-        f"{icon} {phone_name}\n"
-        f"Редкость: {rarity}\n"
-        f"⭐ Количество: {count} шт.\n"
-        f"💰 Цена: 0 ПОчек (нерабочий)\n"
-        f"Поломки: {', '.join(damages)}"
-    )
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    markup.add(telebot.types.InlineKeyboardButton(text="⬅️ Вернуться назад", callback_data=f"inv_bbackphone_{rarity}"))
-
-    _inv_main_msg[uid] = {"has_photo": False}
-    img_path = find_image(phone_name)
-    if img_path:
-        with open(img_path, "rb") as photo:
-            msg = bot.send_photo(call.message.chat.id, photo, caption=text, reply_markup=markup)
-        _inv_main_msg[uid] = {"msg_id": msg.message_id, "has_photo": True}
-    else:
-        msg = bot.send_message(call.message.chat.id, text, reply_markup=markup)
-        _inv_main_msg[uid] = {"msg_id": msg.message_id, "has_photo": False}
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except:
-        pass
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("inv_bbackphone_"))
-def inv_bback_from_broken_phone(call):
-    rarity = call.data[15:]
-    phones_list = get_broken_phones_by_rarity(call.from_user.id, rarity)
-    total = sum(p["count"] for p in phones_list)
-    name = call.from_user.first_name or "игрок"
-    text = f"{name}, ваши нерабочие {rarity.lower()} телефоны ({total} шт.):"
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except:
-        pass
-    # Находим главное сообщение инвентаря и редактируем
-    uid = call.from_user.id
-    info = _inv_main_msg.get(uid, {})
-    msg_id = info.get("msg_id")
-    chat_id = call.message.chat.id
-    if msg_id:
-        has_photo = info.get("has_photo", False)
-        try:
-            if has_photo:
-                bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=text, reply_markup=inv_broken_phones_markup(uid, rarity))
-            else:
-                bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=inv_broken_phones_markup(uid, rarity))
-        except Exception:
-            msg_id = None
-    if not msg_id:
-        _inv_send_photo_msg(chat_id, text, inv_broken_phones_markup(uid, rarity))
+    bot.answer_callback_query(call.id, "Нерабочие телефоны пока недоступны", show_alert=False)
 
 @bot.callback_query_handler(func=lambda call: call.data == "inv_back_main")
 def inv_back_main(call):
@@ -1348,13 +1335,14 @@ def inv_phone(call):
     if img_path:
         with open(img_path, "rb") as photo:
             bot.delete_message(call.message.chat.id, call.message.message_id)
-            msg = bot.send_photo(call.message.chat.id, photo, caption=text, reply_markup=markup)
+            msg = bot.send_photo(call.message.chat.id, photo, caption=text, parse_mode="Markdown", reply_markup=markup)
         _inv_action[uid] = {"msg_id": msg.message_id, "has_photo": True}
     else:
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             text=text,
+            parse_mode="Markdown",
             reply_markup=markup
         )
         _inv_action[uid] = {"msg_id": call.message.message_id, "has_photo": False}
@@ -1383,8 +1371,8 @@ def inv_sell(call):
         return
     name = call.from_user.first_name or "игрок"
     text = (
-        f"{name}, вы уверены, что хотите продать {act['phone_name']} "
-        f"за {act['sell_price']} ПОчек?"
+        f"**{name}**, вы уверены, что хотите продать **{act['phone_name']}** "
+        f"за **{act['sell_price']}** ПОчек?"
     )
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -1395,9 +1383,9 @@ def inv_sell(call):
     has_photo = act["has_photo"]
     try:
         if has_photo:
-            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=msg_id, caption=text, reply_markup=markup)
+            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=msg_id, caption=text, parse_mode="Markdown", reply_markup=markup)
         else:
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=msg_id, text=text, reply_markup=markup)
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=msg_id, text=text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
         print(f"Ошибка inv_sell: {e}")
     bot.answer_callback_query(call.id)
@@ -1427,7 +1415,7 @@ def inv_sell_ok(call):
         udata["points"] = udata.get("points", 0) + sell_price
         update_user(uid, udata)
 
-    text = f"Вы успешно продали {phone_name} за {sell_price} ПОчек!"
+    text = f"Вы успешно продали **{phone_name}** за **{sell_price}** ПОчек!"
     phones_list = get_phones_by_rarity(uid, rarity)
     total = sum(p["count"] for p in phones_list)
     name = call.from_user.first_name or "игрок"
@@ -1439,7 +1427,7 @@ def inv_sell_ok(call):
         bot.delete_message(call.message.chat.id, msg_id)
     except:
         pass
-    bot.send_message(chat_id=call.message.chat.id, text=text)
+    bot.send_message(chat_id=call.message.chat.id, text=text, parse_mode="Markdown")
     has_photo = _inv_send_photo_msg(call.message.chat.id, back_text, back_markup)
     _inv_main_msg[uid] = {"has_photo": has_photo}
     _inv_action.pop(uid, None)
@@ -1464,7 +1452,7 @@ def inv_sell_no(call):
     count = phone_info.get("count", 0)
 
     text = (
-        f"МОИ ТЕЛЕФОНЫ\n\n"
+        f"📱 **МОИ ТЕЛЕФОНЫ**\n\n"
         f"Модель: {phone_name}\n"
         f"Редкость: {rarity}\n"
         f"⭐ Количество: {count} шт.\n"
@@ -1480,9 +1468,9 @@ def inv_sell_no(call):
     has_photo = act["has_photo"]
     try:
         if has_photo:
-            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=msg_id, caption=text, reply_markup=markup)
+            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=msg_id, caption=text, parse_mode="Markdown", reply_markup=markup)
         else:
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=msg_id, text=text, reply_markup=markup)
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=msg_id, text=text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
         print(f"Ошибка inv_sell_no: {e}")
     bot.answer_callback_query(call.id)
@@ -1498,9 +1486,9 @@ def _edit_card_msg(call, text, markup=None):
     has_photo = act.get("has_photo", False)
     try:
         if has_photo:
-            bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=text, reply_markup=markup)
+            bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=text, parse_mode="Markdown", reply_markup=markup)
         else:
-            bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=markup)
+            bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
         print(f"Ошибка редактирования: {e}")
 
@@ -1531,8 +1519,8 @@ def ca_sell(call):
         return
     name = call.from_user.first_name or "игрок"
     text = (
-        f"{name}, вы уверены, что хотите продать {act['name']} "
-        f"за {act['sell_price']} ПОчек?"
+        f"**{name}**, вы уверены, что хотите продать **{act['name']}** "
+        f"за **{act['sell_price']}** ПОчек?"
     )
     _edit_card_msg(call, text, _sell_confirm_markup())
     bot.answer_callback_query(call.id)
@@ -1561,7 +1549,7 @@ def ca_sellok(call):
         udata["points"] = udata.get("points", 0) + sell_price
         update_user(uid, udata)
 
-    text = f"Вы успешно продали {phone_name} за {sell_price} ПОчек!"
+    text = f"Вы успешно продали **{phone_name}** за **{sell_price}** ПОчек!"
     _edit_card_msg(call, text)
     _card_actions.pop(uid, None)
     bot.answer_callback_query(call.id)
@@ -1688,313 +1676,7 @@ def tinfo_refresh(call):
         pass
     bot.answer_callback_query(call.id)
 
-def weekly_tester_pay():
-    """Каждую неделю проверяет юзеров со статусом 'Тестер' и начисляет 1 500 000 ПОчек."""
-    WEEK = 7 * 24 * 60 * 60  # секунды в неделе
-    while True:
-        time.sleep(WEEK)
-        try:
-            data = load_data()
-            paid = 0
-            for uid_str, udata in data.items():
-                status = udata.get("status", "").lower()
-                if "тестер" in status:
-                    uid = int(uid_str)
-                    udata["points"] = udata.get("points", 0) + 1500000
-                    data[uid_str] = udata
-                    paid += 1
-                    try:
-                        bot.send_message(
-                            uid,
-                            "💰 Выплата тестерам 1 500 000 ПОчек!"
-                        )
-                    except:
-                        pass
-            if paid > 0:
-                save_data(data)
-                print(f"Еженедельная выплата: {paid} тестеров получили 1 500 000 ПОчек")
-        except Exception as e:
-            print(f"Ошибка еженедельной выплаты: {e}")
-
-
-# ========== УРОВНИ ШАНСОВ ВЫПАДЕНИЯ ==========
-
-RARITY_ORDER = ["Ширпотреб", "Необычный", "Редкий", "Мистический", "Хроматический", "Аркана", "Платиновый", "Артефакт", "Сезонный"]
-RARITY_ICONS_LIST = ["📱", "📲", "⭐", "✨", "🔮", "🏆", "💠", "💎", "🗓"]
-
-UPG_DROP_PRICES = [0, 10000, 25000, 50000, 100000, 250000, 500000]
-
-UPG_DROP_LEVELS = [
-    {"Ширпотреб": 34.59, "Необычный": 24.0, "Редкий": 20.0, "Мистический": 12.0, "Хроматический": 5.0, "Аркана": 2.5, "Платиновый": 1.0, "Артефакт": 0.4, "Сезонный": 0.0},
-    {"Ширпотреб": 33.39, "Необычный": 22.0, "Редкий": 20.0, "Мистический": 13.5, "Хроматический": 5.5, "Аркана": 3.0, "Платиновый": 1.2, "Артефакт": 0.6, "Сезонный": 0.0},
-    {"Ширпотреб": 32.19, "Необычный": 21.0, "Редкий": 19.0, "Мистический": 14.5, "Хроматический": 6.5, "Аркана": 3.5, "Платиновый": 1.5, "Артефакт": 0.8, "Сезонный": 0.0},
-    {"Ширпотреб": 31.09, "Необычный": 20.0, "Редкий": 18.0, "Мистический": 15.5, "Хроматический": 7.5, "Аркана": 4.0, "Платиновый": 1.8, "Артефакт": 0.9, "Сезонный": 0.0},
-    {"Ширпотреб": 29.79, "Необычный": 19.0, "Редкий": 18.0, "Мистический": 16.0, "Хроматический": 8.5, "Аркана": 4.5, "Платиновый": 2.0, "Артефакт": 1.2, "Сезонный": 0.0},
-    {"Ширпотреб": 28.49, "Необычный": 18.0, "Редкий": 18.0, "Мистический": 16.5, "Хроматический": 9.5, "Аркана": 5.0, "Платиновый": 2.5, "Артефакт": 1.5, "Сезонный": 0.0},
-    {"Ширпотреб": 25.48, "Необычный": 17.0, "Редкий": 18.0, "Мистический": 17.0, "Хроматический": 10.0, "Аркана": 6.0, "Платиновый": 3.0, "Артефакт": 2.5, "Сезонный": 0.0},
-]
-
-# ========== МАГАЗИН УЛУЧШЕНИЙ ==========
-
-UPG_SHOP_IMG = os.path.join(IMAGE_FOLDER, "upgrade_shop.png")
-UPG_CD_LEVELS = [180, 170, 160, 150, 140, 130, 120]
-UPG_CD_PRICES = [0, 10000, 25000, 50000, 100000, 250000, 500000]
-
-
-def _format_chances_text(level_chances, header=""):
-    lines = []
-    if header:
-        lines.append(header)
-    for rarity, icon in zip(RARITY_ORDER, RARITY_ICONS_LIST):
-        val = level_chances.get(rarity, 0)
-        lines.append(f"{icon} {rarity}: {val}%")
-    return "\n".join(lines)
-
-
-def _upg_send_shop(chat_id, text, markup):
-    if os.path.exists(UPG_SHOP_IMG):
-        with open(UPG_SHOP_IMG, "rb") as photo:
-            return bot.send_photo(chat_id, photo, caption=text, reply_markup=markup)
-    else:
-        return bot.send_message(chat_id, text, reply_markup=markup)
-
-
-def _upg_edit_shop(call, text, markup, has_photo):
-    try:
-        if has_photo:
-            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=text, reply_markup=markup)
-        else:
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup)
-    except:
-        pass
-
-
-def _get_cd_level_index(udata):
-    cd_sec = udata.get("card_cooldown", 10800)
-    cd_min = cd_sec // 60
-    for i, lvl_min in enumerate(UPG_CD_LEVELS):
-        if cd_min >= lvl_min:
-            return i
-    return len(UPG_CD_LEVELS) - 1
-
-
-def _upg_has_photo(uid):
-    return _upg_shop_msg.get(uid, {}).get("has_photo", False)
-
-
-def _upg_main_text(name):
-    return f"{name}, добро пожаловать в магазин улучшений!\n\nВыберите, что хотите прокачать:"
-
-
-def _upg_main_markup():
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        telebot.types.InlineKeyboardButton(text="Перезарядка 🕒", callback_data="upg_cooldown"),
-        telebot.types.InlineKeyboardButton(text="Шансы выпадения 🎲", callback_data="upg_drops"),
-        telebot.types.InlineKeyboardButton(text="Шансы апгрейда 🚀", callback_data="upg_upgrade"),
-        telebot.types.InlineKeyboardButton(text="Майнинг ферма 🔨", callback_data="upg_mining"),
-        telebot.types.InlineKeyboardButton(text="Лимит покупок 🛒", callback_data="upg_buylimit"),
-    )
-    return markup
-
-
-@bot.message_handler(commands=["pupgradeshop"])
-def cmd_pupgradeshop(message):
-    uid = message.from_user.id
-    name = message.from_user.first_name or "игрок"
-    text = _upg_main_text(name)
-    markup = _upg_main_markup()
-    msg = _upg_send_shop(message.chat.id, text, markup)
-    _upg_shop_msg[uid] = {"msg_id": msg.message_id, "has_photo": os.path.exists(UPG_SHOP_IMG)}
-
-@bot.message_handler(func=lambda m: m.text and m.text.lower() == "пмагазин улучшений")
-def text_pupgradeshop(message):
-    cmd_pupgradeshop(message)
-
-
-# ===== ПЕРЕЗАРЯДКА =====
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_cooldown")
-def upg_cooldown(call):
-    uid = call.from_user.id
-    udata = get_user_data(uid, "")
-    name = call.from_user.first_name or "игрок"
-    status = udata.get("status", "Обычный")
-    if "Тестер" in status or "Создатель" in status:
-        role = "тестер" if "Тестер" in status else "создатель"
-        text = f"⏱ Перезарядка 'ПКарточка'\n\n{name}, ты {role} и не можешь прокачать так как и так пониженный кд!"
-        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-        markup.add(telebot.types.InlineKeyboardButton(text="⬅️ Назад", callback_data="upg_back"))
-        _upg_edit_shop(call, text, markup, _upg_has_photo(uid))
-        bot.answer_callback_query(call.id)
-        return
-    lvl_idx = _get_cd_level_index(udata)
-    cd_min = UPG_CD_LEVELS[lvl_idx]
-    h = cd_min // 60
-    m = cd_min % 60
-    if lvl_idx >= 6:
-        text = f"⏱ Перезарядка 'ПКарточка'\n\nТекущий уровень: {lvl_idx}\nПерезарядка: {h} ч {m} мин\n\nУ вас максимальный уровень!"
-        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-        markup.add(telebot.types.InlineKeyboardButton(text="⬅️ Назад", callback_data="upg_back"))
-    else:
-        next_min = UPG_CD_LEVELS[lvl_idx + 1]
-        next_h = next_min // 60
-        next_m = next_min % 60
-        cost = UPG_CD_PRICES[lvl_idx + 1]
-        text = f"⏱ Перезарядка 'ПКарточка'\n\nТекущий уровень: {lvl_idx}\nПерезарядка: {h} ч {m} мин\n\nСледующий уровень ({lvl_idx + 1}): {next_h} ч {next_m} мин\nСтоимость: {cost:,} ПОчек"
-        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            telebot.types.InlineKeyboardButton(text=f"📈 Улучшить за {cost:,} ПОчек", callback_data="upg_cooldown_buy"),
-            telebot.types.InlineKeyboardButton(text="⬅️ Назад", callback_data="upg_back"),
-        )
-    _upg_edit_shop(call, text, markup, _upg_has_photo(uid))
-    bot.answer_callback_query(call.id)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_cooldown_buy")
-def upg_cooldown_buy(call):
-    uid = call.from_user.id
-    udata = get_user_data(uid, "")
-    name = call.from_user.first_name or "игрок"
-    lvl_idx = _get_cd_level_index(udata)
-    if lvl_idx >= 6:
-        bot.answer_callback_query(call.id, "Максимальный уровень!", show_alert=True)
-        return
-    cost = UPG_CD_PRICES[lvl_idx + 1]
-    text = f"{name}, вы уверены, что хотите улучшить Перезарядку за {cost:,} ПОчек?"
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        telebot.types.InlineKeyboardButton(text="✅ Подтвердить", callback_data="upg_cooldown_ok"),
-        telebot.types.InlineKeyboardButton(text="❌ Отмена", callback_data="upg_cooldown"),
-    )
-    _upg_edit_shop(call, text, markup, _upg_has_photo(uid))
-    bot.answer_callback_query(call.id)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_cooldown_ok")
-def upg_cooldown_ok(call):
-    uid = call.from_user.id
-    udata = get_user_data(uid, "")
-    name = call.from_user.first_name or "игрок"
-    lvl_idx = _get_cd_level_index(udata)
-    if lvl_idx >= 6:
-        bot.answer_callback_query(call.id, "Максимальный уровень!", show_alert=True)
-        return
-    next_idx = lvl_idx + 1
-    cost = UPG_CD_PRICES[next_idx]
-    if udata.get("points", 0) < cost:
-        bot.answer_callback_query(call.id, "Недостаточно ПОчек!", show_alert=True)
-        return
-    udata["points"] = udata.get("points", 0) - cost
-    udata["card_cooldown"] = UPG_CD_LEVELS[next_idx] * 60
-    update_user(uid, udata)
-    text = f"✅ {name}, вы успешно улучшили Перезарядку до уровня {next_idx}!"
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    markup.add(telebot.types.InlineKeyboardButton(text="⬅️ В магазин", callback_data="upg_back"))
-    _upg_edit_shop(call, text, markup, _upg_has_photo(uid))
-    bot.answer_callback_query(call.id)
-
-
-# ===== ШАНСЫ ВЫПАДЕНИЯ =====
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_drops")
-def upg_drops(call):
-    uid = call.from_user.id
-    udata = get_user_data(uid, "")
-    name = call.from_user.first_name or "игрок"
-    lvl = udata.get("drop_chance_level", 0)
-    if lvl >= 6:
-        text = f"🎲 Шансы выпадения телефонов\n\nТекущий уровень: {lvl}\n\n{_format_chances_text(UPG_DROP_LEVELS[lvl])}\n\nУ вас максимальный уровень!"
-        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-        markup.add(telebot.types.InlineKeyboardButton(text="⬅️ Назад", callback_data="upg_back"))
-    else:
-        cost = UPG_DROP_PRICES[lvl + 1]
-        text = f"🎲 Шансы выпадения телефонов\n\nТекущий уровень: {lvl}\n{_format_chances_text(UPG_DROP_LEVELS[lvl])}\n\nСледующий уровень: {lvl + 1}\n{_format_chances_text(UPG_DROP_LEVELS[lvl + 1])}\n\nСтоимость: {cost:,} ПОчек"
-        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            telebot.types.InlineKeyboardButton(text=f"📈 Улучшить за {cost:,} ПОчек", callback_data="upg_drops_buy"),
-            telebot.types.InlineKeyboardButton(text="⬅️ Назад", callback_data="upg_back"),
-        )
-    _upg_edit_shop(call, text, markup, _upg_has_photo(uid))
-    bot.answer_callback_query(call.id)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_drops_buy")
-def upg_drops_buy(call):
-    uid = call.from_user.id
-    udata = get_user_data(uid, "")
-    name = call.from_user.first_name or "игрок"
-    lvl = udata.get("drop_chance_level", 0)
-    if lvl >= 6:
-        bot.answer_callback_query(call.id, "Максимальный уровень!", show_alert=True)
-        return
-    cost = UPG_DROP_PRICES[lvl + 1]
-    text = f"{name}, вы уверены, что хотите улучшить Шансы выпадения за {cost:,} ПОчек?"
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        telebot.types.InlineKeyboardButton(text="✅ Подтвердить", callback_data="upg_drops_ok"),
-        telebot.types.InlineKeyboardButton(text="❌ Отмена", callback_data="upg_drops"),
-    )
-    _upg_edit_shop(call, text, markup, _upg_has_photo(uid))
-    bot.answer_callback_query(call.id)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_drops_ok")
-def upg_drops_ok(call):
-    uid = call.from_user.id
-    udata = get_user_data(uid, "")
-    name = call.from_user.first_name or "игрок"
-    lvl = udata.get("drop_chance_level", 0)
-    if lvl >= 6:
-        bot.answer_callback_query(call.id, "Максимальный уровень!", show_alert=True)
-        return
-    next_lvl = lvl + 1
-    cost = UPG_DROP_PRICES[next_lvl]
-    if udata.get("points", 0) < cost:
-        bot.answer_callback_query(call.id, "Недостаточно ПОчек!", show_alert=True)
-        return
-    udata["points"] = udata.get("points", 0) - cost
-    udata["drop_chance_level"] = next_lvl
-    update_user(uid, udata)
-    text = f"✅ {name}, вы успешно улучшили Шансы выпадения до уровня {next_lvl}!"
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    markup.add(telebot.types.InlineKeyboardButton(text="⬅️ В магазин", callback_data="upg_back"))
-    _upg_edit_shop(call, text, markup, _upg_has_photo(uid))
-    bot.answer_callback_query(call.id)
-
-
-# ===== ЗАГЛУШКИ =====
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_upgrade")
-def upg_upgrade(call):
-    bot.answer_callback_query(call.id, "Еще не добавлено!", show_alert=True)
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_mining")
-def upg_mining(call):
-    bot.answer_callback_query(call.id, "Еще не добавлено!", show_alert=True)
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_buylimit")
-def upg_buylimit(call):
-    bot.answer_callback_query(call.id, "Еще не добавлено!", show_alert=True)
-
-
-# ===== НАЗАД В МАГАЗИН =====
-
-@bot.callback_query_handler(func=lambda call: call.data == "upg_back")
-def upg_back(call):
-    uid = call.from_user.id
-    name = call.from_user.first_name or "игрок"
-    text = _upg_main_text(name)
-    markup = _upg_main_markup()
-    _upg_edit_shop(call, text, markup, _upg_has_photo(uid))
-    bot.answer_callback_query(call.id)
-
-
 print("Бот запущен!")
-
-t = threading.Thread(target=weekly_tester_pay, daemon=True)
-t.start()
-
 while True:
     try:
         bot.polling(none_stop=True)
